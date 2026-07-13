@@ -33,6 +33,10 @@ platforms :jruby do
   gem 'jruby-openssl'
   gem 'mime-types', ['~> 2.6', '< 2.99']
 
+  # rdoc 8 depends on rbs, whose native extension does not build on JRuby;
+  # railties pulls rdoc in via irb
+  gem 'rdoc', '< 8'
+
   if ENV['RAILS_VERSION'] == 'edge'
     gem 'railties', :github => 'rails/rails'
   elsif ENV['RAILS_VERSION']
@@ -64,15 +68,10 @@ group :test do
     gem 'actionmailer', ['>= 3.0', '< 9.0']
     gem 'activerecord', ['>= 3.0', '< 9.0']
   end
-  gem 'net-smtp' if Gem::Version.new(RUBY_VERSION) >= Gem::Version.new('3.1.0')
+  gem 'net-smtp'
   gem 'rspec', '>= 3'
   gem 'simplecov', '>= 1', :require => false
-  if /\A2.[12]/ =~ RUBY_VERSION
-    # 0.8.0 doesn't work with simplecov < 0.18.0 and older ruby can't run 0.18.0
-    gem 'simplecov-lcov', '< 0.8.0', :require => false
-  else
-    gem 'simplecov-lcov', :require => false
-  end
+  gem 'simplecov-lcov', :require => false
   if Gem::Version.new(RUBY_VERSION) >= Gem::Version.new('3.3.0')
     # New dependencies with a deprecation notice in Ruby 3.3 and required in Ruby 3.4
     # Probably won't get released in rails 7.0
@@ -80,8 +79,6 @@ group :test do
     gem 'bigdecimal'
     gem 'mutex_m'
     gem 'ostruct'
-  elsif Gem::Version.new(RUBY_VERSION) <= Gem::Version.new('2.2.100')
-    gem 'logger', '< 1.3'
   end
   if ENV['RAILS_VERSION'].nil? || ENV['RAILS_VERSION'] >= '6.0.0'
     gem 'zeitwerk', :require => false

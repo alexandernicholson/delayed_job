@@ -13,6 +13,7 @@ Gem::Specification.new do |spec|
   spec.licenses       = ['MIT']
   spec.name           = 'delayed_job'
   spec.require_paths  = ['lib']
+  spec.required_ruby_version = '>= 3.2'
   spec.summary        = 'Database-backed asynchronous priority queue system -- Extracted from Shopify'
   spec.test_files     = Dir.glob('spec/**/*')
   spec.version        = '4.2.0'
