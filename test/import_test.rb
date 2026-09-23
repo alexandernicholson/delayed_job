@@ -82,7 +82,6 @@ class ImportTest < ActiveSupport::TestCase
   end
 
   test "custom payloads land in Solid Queue" do
-    skip_unless_payload_enqueue!
     id = legacy_row(handler: SimpleJob.new.to_yaml, run_at: 1.minute.ago)
 
     import(permitted_classes: [ SimpleJob ])
@@ -93,8 +92,6 @@ class ImportTest < ActiveSupport::TestCase
   end
 
   test "performable method rows are imported" do
-    skip_unless_payload_enqueue!
-    skip_unless_performable_method!
     legacy_row(handler: "--- !ruby/object:Delayed::PerformableMethod\nobject: !ruby/class 'SimpleJob'\nmethod_name: :new\nargs: []\n")
 
     assert_equal 1, import.imported

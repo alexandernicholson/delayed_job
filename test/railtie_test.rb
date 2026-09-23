@@ -32,11 +32,6 @@ class RailtieTest < ActiveSupport::TestCase
     run_initializer("delayed_job.logger")
   end
 
-  test "the logger initializer tolerates a Delayed::Worker without a logger" do
-    skip "Delayed::Worker has a logger" if Delayed::Worker.respond_to?(:logger=)
-    assert_nothing_raised { run_initializer("delayed_job.logger") }
-  end
-
   test "the active_job initializer loads the Solid Queue delayed_job adapter" do
     run_initializer("delayed_job.active_job")
     assert_operator ActiveJob::QueueAdapters::DelayedJobAdapter, :<, ActiveJob::QueueAdapters::SolidQueueAdapter

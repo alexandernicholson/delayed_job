@@ -490,7 +490,6 @@ class BackendBaseTest < ActiveSupport::TestCase
   end
 
   test "HandlerLoader builds performable methods through their constructor" do
-    skip_unless_performable_method!
     yaml = "--- !ruby/object:Delayed::PerformableMethod\nobject: !ruby/class 'SimpleJob'\nmethod_name: :new\nargs: []\n"
     loaded = Delayed::Backend::Base::HandlerLoader.load(yaml)
     assert_instance_of Delayed::PerformableMethod, loaded

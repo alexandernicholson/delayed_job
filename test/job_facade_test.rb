@@ -271,14 +271,12 @@ class JobFacadeTest < ActiveSupport::TestCase
 
   test "name is the instance method of a performable method" do
     skip_unless_story!
-    skip_unless_performable_method!
     job = Delayed::Job.enqueue(Delayed::PerformableMethod.new(OpsStory.create!(text: "..."), :save, []))
     assert_equal "OpsStory#save", job.name
   end
 
   test "name is parsed from the handler on deserialization error" do
     skip_unless_story!
-    skip_unless_performable_method!
     story = OpsStory.create!(text: "...")
     job = Delayed::Job.enqueue(Delayed::PerformableMethod.new(story, :tell, []))
     story.destroy
@@ -349,7 +347,6 @@ class JobFacadeTest < ActiveSupport::TestCase
   end
 
   test "large handler has an id" do
-    skip_unless_performable_method!
     text = "Lorem ipsum dolor sit amet. " * 1000
     assert_not_nil Delayed::Job.enqueue(Delayed::PerformableMethod.new(text, :length, {})).id
   end
@@ -420,7 +417,6 @@ class JobFacadeTest < ActiveSupport::TestCase
 
   test "reload reloads changed attributes of records" do
     skip_unless_story!
-    skip_unless_performable_method!
     story = OpsStory.create!(text: "hello")
     job = Delayed::Job.enqueue(Delayed::PerformableMethod.new(story, :tell, []))
     story.update!(text: "goodbye")
@@ -429,7 +425,6 @@ class JobFacadeTest < ActiveSupport::TestCase
 
   test "reload raises DeserializationError for destroyed records" do
     skip_unless_story!
-    skip_unless_performable_method!
     story = OpsStory.create!(text: "hello")
     job = Delayed::Job.enqueue(Delayed::PerformableMethod.new(story, :tell, []))
     story.destroy
@@ -1067,7 +1062,6 @@ class JobFacadeTest < ActiveSupport::TestCase
   end
 
   test "worker integration records last_error and fails the job" do
-    skip "needs Delayed::Worker#run" unless Delayed::Worker.method_defined?(:run)
     Delayed::Worker.destroy_failed_jobs = false
     Delayed::Worker.max_attempts = 1
     job = Delayed::Job.enqueue(ErrorJob.new, run_at: Delayed::Job.db_time_now - 1)
@@ -1079,7 +1073,6 @@ class JobFacadeTest < ActiveSupport::TestCase
   end
 
   test "worker integration re-schedules jobs after failing" do
-    skip "needs Delayed::Worker#run" unless Delayed::Worker.method_defined?(:run)
     job = Delayed::Job.enqueue(ErrorJob.new, run_at: Delayed::Job.db_time_now - 1)
     Delayed::Worker.new.run(job)
     job.reload
@@ -1089,7 +1082,6 @@ class JobFacadeTest < ActiveSupport::TestCase
   end
 
   test "worker integration re-schedules with the handler provided time" do
-    skip "needs Delayed::Worker#run" unless Delayed::Worker.method_defined?(:run)
     job = Delayed::Job.enqueue(CustomRescheduleJob.new(99.minutes))
     Delayed::Worker.new.run(job)
     assert_in_delta Delayed::Job.db_time_now + 99.minutes, job.reload.run_at, 1

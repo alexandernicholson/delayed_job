@@ -77,21 +77,9 @@ module OpsTestHelper
       Delayed::Worker.stubs(name).returns(value)
     end
 
-    def skip_unless_payload_enqueue!
-      skip "needs Delayed::JobWrapper.enqueue_payload" unless Delayed::JobWrapper.respond_to?(:enqueue_payload)
-    end
 
-    def skip_unless_job_preparer!
-      skip "needs Delayed::Backend::JobPreparer#prepare" unless Delayed::Backend::JobPreparer.method_defined?(:prepare)
-    end
 
-    def skip_unless_performable_method!
-      skip "needs Delayed::PerformableMethod" unless Delayed::PerformableMethod.method_defined?(:perform)
-    end
 
-    def skip_unless_message_sending!
-      skip "needs Delayed::MessageSending#delay" unless Object.method_defined?(:delay)
-    end
 
     def skip_unless_story!
       skip "needs the Active Record Story model (SQL backend)" unless BACKEND == :active_record
