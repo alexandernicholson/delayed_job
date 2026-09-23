@@ -134,7 +134,11 @@ module Delayed
         end
 
         def claimed_elsewhere?(argument)
-          ActiveJob::Serializers.serializers.any? { |serializer| !serializer.equal?(self) && serializer.serialize?(argument) }
+          ActiveJob::Serializers.serializers.any? { |serializer| !own_entry?(serializer) && serializer.serialize?(argument) }
+        end
+
+        def own_entry?(serializer)
+          serializer.equal?(self) || serializer.equal?(self.class)
         end
     end
   end

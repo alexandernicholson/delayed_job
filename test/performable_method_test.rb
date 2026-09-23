@@ -269,14 +269,38 @@ class PerformableMethodTest < ActiveSupport::TestCase
       end
     end
     stub_const(PerformableMethodTest, :MoneySerializer, money) do
-      previous = ActiveJob::Serializers.serializers.to_a
-      ActiveJob::Serializers.add_serializers(PerformableMethodTest::MoneySerializer)
-      begin
-        serialized = Delayed::Serializers::ObjectSerializer.permit { ActiveJob::Arguments.serialize([ Target.new("money") ]) }
-        assert_equal "PerformableMethodTest::MoneySerializer", serialized.first["_aj_serialized"]
-      ensure
-        ActiveJob::Serializers.serializers = previous
+      registered = ActiveJob::Serializers.serializers
+      entry = registered.first.is_a?(Class) ? PerformableMethodTest::MoneySerializer : PerformableMethodTest::MoneySerializer.instance
+      ActiveJob::Serializers.stubs(:serializers).returns(registered + [ entry ])
+
+      serialized = Delayed::Serializers::ObjectSerializer.permit { ActiveJob::Arguments.serialize([ Target.new("money") ]) }
+      assert_equal "PerformableMethodTest::MoneySerializer", serialized.first["_aj_serialized"]
+    end
+  end
+
+  test "the object serializer skips its own registry entry whether Active Job keeps classes or instances" do
+    serializer = Delayed::Serializers::ObjectSerializer
+
+    [ serializer, serializer.instance ].each do |entry|
+      ActiveJob::Serializers.stubs(:serializers).returns(Set.new([ entry ]))
+
+      assert serializer.permit { serializer.serialize?(Target.new("hi")) }, "registered as #{entry.inspect}"
+    end
+  end
+
+  test "the object serializer defers to other serializers registered as classes or instances" do
+    serializer = Delayed::Serializers::ObjectSerializer
+    claiming = Class.new(ActiveJob::Serializers::ObjectSerializer) do
+      def serialize?(argument)
+        argument.is_a?(PerformableMethodTest::Target)
       end
+    end
+
+    [ claiming, claiming.instance ].each do |entry|
+      ActiveJob::Serializers.stubs(:serializers).returns(Set.new([ serializer, serializer.instance, entry ]))
+
+      assert_not serializer.permit { serializer.serialize?(Target.new("hi")) }, "registered as #{entry.inspect}"
+      assert serializer.permit { serializer.serialize?(Point.new(1, 2)) }
     end
   end
 
