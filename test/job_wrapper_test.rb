@@ -11,7 +11,28 @@ class JobWrapperTest < ActiveSupport::TestCase
     end
   end
 
+  class Gizmo
+    include GlobalID::Identification
+
+    cattr_accessor :spun, default: []
+    attr_reader :id
+
+    def self.find(id)
+      new(id)
+    end
+
+    def initialize(id)
+      @id = id
+      @kind = Class.new
+    end
+
+    def spin(times)
+      spun << [ id, times ]
+    end
+  end
+
   setup do
+    Gizmo.spun = []
     Delayed::Worker.default_priority = 99
     Delayed::Worker.default_queue_name = "default_tracking"
     M::ModuleJob.runs = 0
@@ -50,13 +71,87 @@ class JobWrapperTest < ActiveSupport::TestCase
 
     assert_equal "imported-1", job.job_id
     assert_equal 3, job.attempts
-    assert_equal 3, serialized_job("imported-1")["executions"]
+    assert_equal 3, solid_queue_job("imported-1").arguments["executions"]
   end
 
   test "enqueue_payload uses the Active Job default queue when there is no queue" do
     job = Delayed::JobWrapper.enqueue_payload(SimpleJob.new, priority: 0)
 
     assert_equal "default", job.queue
+  end
+
+  test "enqueue_payload stores the payload without hooks, lifecycle callbacks or the delay_jobs switch" do
+    events = []
+    Delayed::Worker.lifecycle.before(:enqueue) { |job| events << job }
+    Delayed::Worker.delay_jobs = false
+
+    job = Delayed::JobWrapper.enqueue_payload(CallbackJob.new, queue: "plain")
+
+    assert_empty CallbackJob.messages
+    assert_empty events
+    assert_equal [ job.job_id ], queued_jobs.map(&:active_job_id)
+  end
+
+  test "enqueue_payload publishes enqueue.delayed_job" do
+    events = capture_delayed_job_events { @job = Delayed::JobWrapper.enqueue_payload(NamedJob.new, queue: "events", priority: 4) }
+
+    enqueue = events.find { |event| event.name == "enqueue.delayed_job" }
+    assert_equal({ display_name: "named_job", job_id: @job.job_id, queue: "events", priority: 4, attempts: 0 }, enqueue.payload.slice(:display_name, :job_id, :queue, :priority, :attempts))
+  end
+
+  test "Delayed::Job.enqueue returns the Delayed::Job record" do
+    job = Delayed::Job.enqueue(SimpleJob.new, queue: "records", priority: 3)
+
+    assert_instance_of Delayed::Job, job
+    assert job.persisted?
+    assert_equal SolidQueue::Job.find(job.id).active_job_id, job.active_job_id
+    assert_equal "Delayed::JobWrapper", stored_job(job).class_name
+    assert_equal [ "records", 3, 0 ], [ job.queue, job.priority, job.attempts ]
+  end
+
+  test "Delayed::Job.enqueue runs the enqueue hook and lifecycle once, with the record" do
+    events = []
+    Delayed::Worker.lifecycle.around(:enqueue) do |job, &block|
+      events << job.class
+      block.call(job)
+    end
+
+    Delayed::Job.enqueue(CallbackJob.new)
+
+    assert_equal [ "enqueue" ], CallbackJob.messages
+    assert_equal [ Delayed::Job ], events
+  end
+
+  test "handler is the YAML of the payload" do
+    assert_equal NamedJob.new(:done).to_yaml, Delayed::JobWrapper.new(NamedJob.new(:done)).handler
+    assert_equal NamedJob.new(:done).to_yaml, Delayed::Job.enqueue(NamedJob.new(:done)).reload.handler
+  end
+
+  test "handler of a payload that cannot be loaded is tagged with the payload class" do
+    story = Story.create(text: "hello")
+    job = story.delay.tell
+    story.destroy
+
+    handler = stored_wrapper(job).handler
+
+    assert_match %r{\A--- !ruby/object:Delayed::PerformableMethod \{}, handler
+    assert_includes handler, story.to_global_id.to_s
+  end
+
+  test "name is parsed from the handler when the payload cannot be loaded" do
+    story = Story.create(text: "...")
+    job = story.delay.text
+    story.destroy
+
+    assert_equal "Delayed::PerformableMethod", job.reload.name
+  end
+
+  test "delay stores targets whose YAML can not be dumped" do
+    job = Gizmo.new("7").delay.spin(2)
+
+    assert_equal [ :spin, [ 2 ] ], [ job.payload_object.method_name, job.payload_object.args ]
+    perform_ready_jobs
+    assert_equal [ [ "7", 2 ] ], Gizmo.spun
   end
 
   test "enqueue with a hash raises ArgumentError when the payload does not respond to perform" do
@@ -114,7 +209,7 @@ class JobWrapperTest < ActiveSupport::TestCase
 
     assert_empty queued_jobs
     assert_equal 1, SimpleJob.runs
-    assert_instance_of Delayed::JobWrapper, job
+    assert_instance_of Delayed::Job, job
     assert_nil job.id
   end
 
@@ -133,7 +228,7 @@ class JobWrapperTest < ActiveSupport::TestCase
 
     Delayed::Job.enqueue SimpleJob.new, priority: 5
     assert_equal 1, SimpleJob.runs
-    assert_instance_of Delayed::JobWrapper, seen
+    assert_instance_of Delayed::Job, seen
 
     Delayed::Job.enqueue SimpleJob.new, priority: 20
     assert_equal 1, SimpleJob.runs
@@ -214,7 +309,7 @@ class JobWrapperTest < ActiveSupport::TestCase
 
     Delayed::Job.enqueue(SimpleJob.new).invoke_job
 
-    assert_equal [ [ :enqueue, Delayed::JobWrapper ], [ :invoke_job, Delayed::JobWrapper ] ], events
+    assert_equal [ [ :enqueue, Delayed::Job ], [ :invoke_job, Delayed::Job ] ], events
   end
 
   test "custom job objects round-trip through Solid Queue with their state" do
@@ -229,8 +324,7 @@ class JobWrapperTest < ActiveSupport::TestCase
   test "struct jobs round-trip through Solid Queue" do
     job = Delayed::Job.enqueue NamedJob.new(:done)
 
-    loaded = ActiveJob::Base.deserialize(serialized_job(job.job_id)).payload_object
-    assert_equal NamedJob.new(:done), loaded
+    assert_equal NamedJob.new(:done), job.reload.payload_object
   end
 
   test "jobs performed by Solid Queue run their hooks and finish" do
@@ -243,19 +337,19 @@ class JobWrapperTest < ActiveSupport::TestCase
     assert_empty solid_queue_jobs(:failed)
   end
 
-  test "display_name and name come from the payload" do
+  test "name comes from the payload" do
     assert_equal "named_job", Delayed::Job.enqueue(NamedJob.new).name
     assert_equal "ErrorJob", Delayed::Job.enqueue(ErrorJob.new).name
     assert_equal "Story#save", Story.create(text: "...").delay.save.name
-    assert_equal "named_job", Delayed::Job.enqueue(NamedJob.new).display_name
+    assert_equal "named_job", Delayed::Job.enqueue(NamedJob.new).reload.name
   end
 
-  test "name falls back to the payload class when the payload cannot be loaded" do
+  test "the stored wrapper names the payload class when the payload cannot be loaded" do
     story = Story.create(text: "...")
     job = story.delay.text
     story.destroy
 
-    loaded = ActiveJob::Base.deserialize(serialized_job(job.job_id))
+    loaded = stored_wrapper(job)
     assert_equal "Delayed::PerformableMethod", loaded.name
     assert_raises(Delayed::DeserializationError) { loaded.payload_object }
   end
@@ -266,7 +360,7 @@ class JobWrapperTest < ActiveSupport::TestCase
     story.text = "goodbye"
     story.save!
 
-    assert_equal "goodbye", ActiveJob::Base.deserialize(serialized_job(job.job_id)).payload_object.object.text
+    assert_equal "goodbye", job.reload.payload_object.object.text
   end
 
   test "reloading a job with a destroyed record raises DeserializationError" do
@@ -274,8 +368,8 @@ class JobWrapperTest < ActiveSupport::TestCase
     job = story.delay.tell
     story.destroy
 
-    error = assert_raises(Delayed::DeserializationError) { ActiveJob::Base.deserialize(serialized_job(job.job_id)).payload_object }
-    assert_match(/\AJob failed to load: /, error.message)
+    error = assert_raises(Delayed::DeserializationError) { job.reload.payload_object }
+    assert_match(/\AJob failed to load: .* Handler: "--- !ruby\/object:Delayed::PerformableMethod /, error.message)
   end
 
   test "payload_object can be replaced" do
@@ -327,8 +421,16 @@ class JobWrapperTest < ActiveSupport::TestCase
   test "publishes enqueue.delayed_job with the job details" do
     events = capture_delayed_job_events { @job = Delayed::Job.enqueue(NamedJob.new, queue: "events", priority: 4) }
 
-    enqueue = events.find { |event| event.name == "enqueue.delayed_job" }
-    assert_equal({ display_name: "named_job", job_id: @job.job_id, queue: "events", priority: 4, attempts: 0 }, enqueue.payload.slice(:display_name, :job_id, :queue, :priority, :attempts))
+    enqueue = events.select { |event| event.name == "enqueue.delayed_job" }.sole
+    assert_equal({ display_name: "named_job", job_id: @job.active_job_id, queue: "events", priority: 4, attempts: 0 }, enqueue.payload.slice(:display_name, :job_id, :queue, :priority, :attempts))
+  end
+
+  test "does not publish enqueue.delayed_job when delay_jobs is false" do
+    Delayed::Worker.delay_jobs = false
+
+    events = capture_delayed_job_events { Delayed::Job.enqueue(SimpleJob.new) }
+
+    assert_empty events.select { |event| event.name == "enqueue.delayed_job" }
   end
 
   test "publishes perform.delayed_job when Solid Queue runs the job" do
@@ -337,7 +439,7 @@ class JobWrapperTest < ActiveSupport::TestCase
     events = capture_delayed_job_events { perform_ready_jobs }
 
     perform = events.find { |event| event.name == "perform.delayed_job" }
-    assert_equal job.job_id, perform.payload[:job_id]
+    assert_equal job.active_job_id, perform.payload[:job_id]
     assert_equal "SimpleJob", perform.payload[:display_name]
     assert_equal 0, perform.payload[:attempts]
     assert perform.payload[:success]
@@ -361,6 +463,22 @@ class JobWrapperTest < ActiveSupport::TestCase
     assert_equal :exactly_once, Delayed::Job.enqueue(payload_object: SimpleJob.new, delivery_mode: "exactly_once").delivery_mode
   end
 
+  test "Delayed::Job.new takes delivery_mode and passes it to enqueue_payload" do
+    job = Delayed::Job.new(payload_object: SimpleJob.new, delivery_mode: :at_most_once)
+    assert_equal :at_most_once, job.delivery_mode
+
+    Delayed::JobWrapper.expects(:enqueue_payload).with(job.payload_object, has_entries(delivery_mode: :at_most_once)).returns(PlainActiveJob.perform_later)
+    assert job.save
+  end
+
+  test "a delay_jobs false record resolves its delivery_mode" do
+    Delayed::Worker.delay_jobs = false
+
+    assert_equal :exactly_once, Delayed::Job.enqueue(SimpleJob.new).delivery_mode
+    assert_equal :at_most_once, Delayed::Job.enqueue(AtMostOnceJob.new).delivery_mode
+    assert_equal :at_least_once, Delayed::Job.enqueue(SimpleJob.new, delivery_mode: :at_least_once).delivery_mode
+  end
+
   test "enqueue_payload takes the delivery_mode option" do
     assert_equal :at_most_once, Delayed::JobWrapper.enqueue_payload(SimpleJob.new, delivery_mode: :at_most_once).delivery_mode
     assert_equal :exactly_once, Delayed::JobWrapper.enqueue_payload(SimpleJob.new, delivery_mode: nil).delivery_mode
@@ -371,6 +489,7 @@ class JobWrapperTest < ActiveSupport::TestCase
 
     assert_equal "Unknown delivery mode :twice. Use :at_least_once, :at_most_once or :exactly_once.", error.message
     assert_empty queued_jobs
+    assert_empty CallbackJob.messages
   end
 
   test "an unknown payload delivery_mode raises before anything is stored" do
@@ -385,6 +504,7 @@ class JobWrapperTest < ActiveSupport::TestCase
     job = Notifier.new("sms").delay.notify
 
     assert_equal :exactly_once, job.delivery_mode
+    assert_equal :exactly_once, job.reload.delivery_mode
     perform_ready_jobs
     assert_equal [ "sms" ], Notifier.sent
   end
@@ -394,21 +514,21 @@ class JobWrapperTest < ActiveSupport::TestCase
     job = story.delay.tell
     story.destroy
 
-    assert_equal :exactly_once, ActiveJob::Base.deserialize(serialized_job(job.job_id)).delivery_mode
+    assert_equal :exactly_once, job.reload.delivery_mode
   end
 
   test "the delivery_mode option round-trips through the stored job" do
     job = Delayed::Job.enqueue(AtMostOnceJob.new, delivery_mode: :at_least_once)
 
-    assert_equal "at_least_once", serialized_job(job.job_id)["delivery_mode"]
-    assert_equal :at_least_once, ActiveJob::Base.deserialize(serialized_job(job.job_id)).delivery_mode
+    assert_equal "at_least_once", stored_arguments(job)["delivery_mode"]
+    assert_equal :at_least_once, job.reload.delivery_mode
   end
 
   test "jobs without a delivery_mode option store none and resolve it when loaded" do
     job = Delayed::Job.enqueue(AtMostOnceJob.new)
 
-    assert_not serialized_job(job.job_id).key?("delivery_mode")
-    assert_equal :at_most_once, ActiveJob::Base.deserialize(serialized_job(job.job_id)).delivery_mode
+    assert_not stored_arguments(job).key?("delivery_mode")
+    assert_equal :at_most_once, job.reload.delivery_mode
   end
 
   test "retries keep the delivery_mode option" do
@@ -416,9 +536,17 @@ class JobWrapperTest < ActiveSupport::TestCase
 
     perform_ready_jobs
 
-    rescheduled = solid_queue_jobs(:scheduled).sole
-    assert_equal job.job_id, rescheduled.active_job_id
-    assert_equal "at_most_once", rescheduled.arguments["delivery_mode"]
+    assert_equal 1, job.reload.attempts
+    assert_equal :at_most_once, job.delivery_mode
+    assert_equal "at_most_once", stored_arguments(job)["delivery_mode"]
+  end
+
+  test "rescheduling a record through the facade keeps the delivery_mode option" do
+    job = Delayed::Job.enqueue(ErrorJob.new, delivery_mode: :at_least_once)
+
+    Delayed::Worker.new.run(job)
+
+    assert_equal :at_least_once, job.reload.delivery_mode
   end
 
   test "Delayed::Worker.delivery_mode leaves other Active Job classes alone" do
@@ -438,9 +566,9 @@ class JobWrapperTest < ActiveSupport::TestCase
     opted_out = Delayed::Job.enqueue(SimpleJob.new, delivery_mode: :at_least_once)
     from_payload = Delayed::Job.enqueue(AtMostOnceJob.new)
 
-    assert_equal "exactly_once", solid_queue_job(default.job_id).delivery_mode.to_s
-    assert_equal "at_least_once", solid_queue_job(opted_out.job_id).delivery_mode.to_s
-    assert_equal "at_most_once", solid_queue_job(from_payload.job_id).delivery_mode.to_s
+    assert_equal "exactly_once", stored_job(default).delivery_mode.to_s
+    assert_equal "at_least_once", stored_job(opted_out).delivery_mode.to_s
+    assert_equal "at_most_once", stored_job(from_payload).delivery_mode.to_s
   end
 
   test "Solid Queue keeps its own default delivery mode for plain Active Job jobs" do
@@ -472,7 +600,9 @@ class JobWrapperTest < ActiveSupport::TestCase
   test "Solid Queue job names use the payload display_name" do
     assert Delayed::JobWrapper.method_defined?(:display_name)
 
-    job = ActiveJob::Base.deserialize(serialized_job(Delayed::Job.enqueue(NamedJob.new).job_id))
-    assert_equal "named_job", job.display_name
+    job = Delayed::Job.enqueue(NamedJob.new)
+
+    assert_equal "named_job", stored_wrapper(job).display_name
+    assert_equal "named_job", SolidQueue::Job.find(job.id).display_name
   end
 end

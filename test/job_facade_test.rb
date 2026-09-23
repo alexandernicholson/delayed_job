@@ -270,14 +270,12 @@ class JobFacadeTest < ActiveSupport::TestCase
   end
 
   test "name is the instance method of a performable method" do
-    skip_unless_story!
-    job = Delayed::Job.enqueue(Delayed::PerformableMethod.new(OpsStory.create!(text: "..."), :save, []))
-    assert_equal "OpsStory#save", job.name
+    job = Delayed::Job.enqueue(Delayed::PerformableMethod.new(Story.create(text: "..."), :save, []))
+    assert_equal "Story#save", job.name
   end
 
   test "name is parsed from the handler on deserialization error" do
-    skip_unless_story!
-    story = OpsStory.create!(text: "...")
+    story = Story.create(text: "...")
     job = Delayed::Job.enqueue(Delayed::PerformableMethod.new(story, :tell, []))
     story.destroy
     assert_equal "Delayed::PerformableMethod", job.reload.name
@@ -416,16 +414,15 @@ class JobFacadeTest < ActiveSupport::TestCase
   end
 
   test "reload reloads changed attributes of records" do
-    skip_unless_story!
-    story = OpsStory.create!(text: "hello")
+    story = Story.create(text: "hello")
     job = Delayed::Job.enqueue(Delayed::PerformableMethod.new(story, :tell, []))
-    story.update!(text: "goodbye")
+    story.text = "goodbye"
+    story.save!
     assert_equal "goodbye", job.reload.payload_object.object.text
   end
 
   test "reload raises DeserializationError for destroyed records" do
-    skip_unless_story!
-    story = OpsStory.create!(text: "hello")
+    story = Story.create(text: "hello")
     job = Delayed::Job.enqueue(Delayed::PerformableMethod.new(story, :tell, []))
     story.destroy
     assert_raises(Delayed::DeserializationError) { job.reload.payload_object }

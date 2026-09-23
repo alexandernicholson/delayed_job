@@ -9,11 +9,11 @@ flowchart LR
   M["UserMailer.delay.signup(email)"] --> P
   C["Delayed::Job.enqueue(obj, run_at:)"] --> J
   P --> PM["PerformableMethod / PerformableMailer<br/>object, method_name, args"] --> J[JobPreparer<br/>queue, priority, queue_attributes]
-  J --> E["JobWrapper.enqueue_payload"]
-  E --> L{Lifecycle :enqueue<br/>payload enqueue hook}
+  J --> R["Delayed::Job.new<br/>(the record)"]
+  R --> L{Lifecycle :enqueue<br/>payload enqueue hook}
   L --> D{Delayed::Worker.delay_job?}
-  D -- true --> SQ[("Solid Queue job<br/>class Delayed::JobWrapper")]
-  D -- false --> I[invoke_job inline]
+  D -- true --> S["record.save"] --> E["JobWrapper.enqueue_payload"] --> SQ[("Solid Queue job<br/>class Delayed::JobWrapper")]
+  D -- false --> I[record.invoke_job inline]
 ```
 
 ## `delay`
@@ -24,7 +24,7 @@ User.delay(queue: "mailers", priority: 5, run_at: 1.hour.from_now).cleanup
 "hello".__delay__.count("l")
 ```
 
-`delay(options = {})` is on every object and returns a `Delayed::DelayProxy`. Any method called on the proxy becomes a job: the proxy builds `Delayed::PerformableMethod.new(target, method, args)` and calls `Delayed::Job.enqueue(payload_object: ..., **options)`. The return value is the job (a `Delayed::JobWrapper`). `__delay__` is an alias for code that defines its own `delay`.
+`delay(options = {})` is on every object and returns a `Delayed::DelayProxy`. Any method called on the proxy becomes a job: the proxy builds `Delayed::PerformableMethod.new(target, method, args)` and calls `Delayed::Job.enqueue(payload_object: ..., **options)`. The return value is the job, a `Delayed::Job` record, as in delayed_job. `__delay__` is an alias for code that defines its own `delay`.
 
 Options:
 
@@ -155,30 +155,18 @@ A record that has been deleted by the time the job runs raises `Delayed::Deseria
 
 ## The job object
 
-`Delayed::Job.enqueue`, `delay` and `handle_asynchronously` return a `Delayed::JobWrapper`:
+`Delayed::Job.enqueue`, `delay` and `handle_asynchronously` return a `Delayed::Job` record (`nil` `id` for inline jobs). It has delayed_job's attributes and methods, read from Solid Queue; see [`Delayed::Job`](job.md). The `enqueue` hook, the `:enqueue` and `:invoke_job` lifecycle events and the `delay_jobs` proc receive this record. `job.reload` re-reads it, following retries, so `attempts`, `run_at`, `last_error` and `failed_at` show the latest attempt. `job.delivery_mode` is the job's [delivery mode](retries.md#delivery-modes).
 
-| Method | Value |
-|---|---|
-| `id` | Solid Queue job id (`nil` for inline jobs) |
-| `job_id` | Active Job id; stays the same across retries |
-| `payload_object`, `payload_object=` | The payload |
-| `name`, `display_name` | Payload `display_name`, else its class name (`User#welcome` for a `PerformableMethod`) |
-| `handler` | JSON of the serialized payload |
-| `queue`, `priority`, `run_at`, `attempts` | As enqueued |
-| `invoke_job`, `hook(name, *args)` | Run the payload with hooks, run one hook |
-| `reschedule_at`, `max_attempts`, `max_run_time`, `destroy_failed_jobs?`, `delivery_mode` | [Retry policy](retries.md) |
-| `error`, `last_error`, `failed?`, `failed_at`, `locked_at`, `locked_by`, `unlock` | delayed_job's attributes |
-| `save`, `save!`, `destroy`, `fail!` | Re-enqueue, remove or fail the stored copy in Solid Queue |
+In Solid Queue the job is stored as a `Delayed::JobWrapper` Active Job. When a worker runs it, the wrapper is the job that the `before`, `success`, `error`, `after` and `failure` hooks and the `:perform`, `:error` and `:failure` lifecycle events receive. It has the same readers as the record (`id`, `name`, `queue`, `priority`, `run_at`, `attempts`, `payload_object`, `error`, `last_error`, `locked_at`, `locked_by`) plus `job_id`, the Active Job id, which stays the same across retries. Its `handler` is the payload's YAML, or, when the payload can't be loaded, a `--- !ruby/object:PayloadClass {...}` document holding the serialized payload.
 
 Solid Queue lists these jobs with class `Delayed::JobWrapper` and uses the payload's display name in its logs. `Delayed::JobWrapper.log_arguments` is false, so Active Job's enqueue and perform log lines name the job without printing the payload or its records.
 
 ## `Delayed::JobWrapper.enqueue_payload` contract
 
-`Delayed::Job.enqueue(*args)` hands its prepared options to this method:
+`Delayed::Job.enqueue(*args)` prepares the options, builds the record and runs the enqueue hook, lifecycle and `delay_jobs` decision (`Delayed::Backend::Base.enqueue_job`). Saving a new record then stores it with this method:
 
 ```ruby
-job_options = Delayed::Backend::JobPreparer.new(*args).prepare
-Delayed::JobWrapper.enqueue_payload(job_options[:payload_object], job_options)
+Delayed::JobWrapper.enqueue_payload(record.payload_object, queue:, priority:, run_at:, attempts:, job_id:, delivery_mode:)
 ```
 
 `Delayed::JobWrapper.enqueue_payload(payload_object, options = {}) -> Delayed::JobWrapper`
@@ -192,7 +180,5 @@ Delayed::JobWrapper.enqueue_payload(job_options[:payload_object], job_options)
   - `:job_id`: Active Job id to use (optional, for idempotent imports).
   - `:delivery_mode`: `:at_least_once`, `:at_most_once` or `:exactly_once` (optional; unknown values raise `ArgumentError`). Stored in the serialized job as `"delivery_mode"`.
   - `:payload_object` and any other keys are ignored.
-- It builds the job, applies the options, then runs `Delayed::Worker.lifecycle.run_callbacks(:enqueue, job)` around the payload's `enqueue` hook and one of:
-  - `Delayed::Worker.delay_job?(job)` true: `job.save`, stored in Solid Queue and wrapped in the `enqueue.delayed_job` notification. `save` returns `false` if Solid Queue rejects the job; `save!` raises `ActiveJob::EnqueueError`.
-  - false: `job.invoke_job` runs inline; exceptions propagate.
-- It returns the job in both cases, never the result of `perform`.
+- It builds the job, applies the options and stores it in Solid Queue, wrapped in the `enqueue.delayed_job` notification. It runs no hooks or lifecycle callbacks and ignores `delay_jobs`.
+- It returns the job. If Solid Queue rejects it (a deduplicated duplicate, say), `provider_job_id` is `nil` and the record's `save` returns `false`.

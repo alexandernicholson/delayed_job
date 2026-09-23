@@ -19,13 +19,13 @@ module EnqueueTestHelper
 
   included do
     setup do
-      @saved_worker_settings = WORKER_SETTINGS.index_with { |setting| Delayed::Worker.public_send(setting) }
+      @saved_worker_settings = WORKER_SETTINGS.index_with { |setting| Delayed::Worker.class_variable_get(:"@@#{setting}") }
       @saved_worker_plugins = Delayed::Worker.plugins.dup
       CallbackJob.messages = [] if defined?(CallbackJob)
     end
 
     teardown do
-      @saved_worker_settings.each { |setting, value| Delayed::Worker.public_send("#{setting}=", value) }
+      @saved_worker_settings.each { |setting, value| Delayed::Worker.class_variable_set(:"@@#{setting}", value) }
       Delayed::Worker.plugins = @saved_worker_plugins
       ActiveJob::QueueAdapters::SolidQueueAdapter.stopping = false
       SolidQueue::ExecutionHooks.clear
@@ -67,12 +67,20 @@ module EnqueueTestHelper
       SolidQueue::Admin.find_job(active_job_id)
     end
 
-    def serialized_job(active_job_id)
-      solid_queue_job(active_job_id).arguments
+    def stored_job(job)
+      SolidQueue::Admin.find_job(job.active_job_id)
     end
 
-    def failed_job_error(active_job_id)
-      SolidQueue::Admin.job_attributes(solid_queue_job(active_job_id), status: :failed)[:error].with_indifferent_access
+    def stored_arguments(job)
+      stored_job(job).arguments
+    end
+
+    def stored_wrapper(job)
+      ActiveJob::Base.deserialize(stored_arguments(job))
+    end
+
+    def failed_job_error(job)
+      SolidQueue::Admin.job_attributes(stored_job(job), status: :failed)[:error].with_indifferent_access
     end
 
     def capture_delayed_job_events(pattern = /\.delayed_job\z/)

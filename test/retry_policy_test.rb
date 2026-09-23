@@ -80,7 +80,7 @@ class RetryPolicyTest < ActiveSupport::TestCase
     job = story.delay.tell
     story.destroy
 
-    assert_equal true, ActiveJob::Base.deserialize(serialized_job(job.job_id)).destroy_failed_jobs?
+    assert_equal true, job.reload.destroy_failed_jobs?
   end
 
   test "a failing job is rescheduled with the default back-off" do
@@ -90,10 +90,12 @@ class RetryPolicyTest < ActiveSupport::TestCase
       perform_ready_jobs
 
       rescheduled = solid_queue_jobs(:scheduled)
-      assert_equal [ job.job_id ], rescheduled.map(&:active_job_id)
-      assert_in_delta Time.current + 6, rescheduled.first.scheduled_at, 1
-      assert_equal 1, rescheduled.first.arguments["executions"]
-      assert_equal 1, ActiveJob::Base.deserialize(rescheduled.first.arguments).attempts
+      assert_equal [ job.active_job_id ], rescheduled.map(&:active_job_id)
+      job.reload
+      assert_equal 1, job.attempts
+      assert_in_delta Time.current + 6, job.run_at, 1
+      assert_match(/did not work/, job.last_error)
+      assert_nil job.failed_at
     end
     assert_empty solid_queue_jobs(:failed)
   end
@@ -104,31 +106,31 @@ class RetryPolicyTest < ActiveSupport::TestCase
     perform_due_jobs(at: 1.minute.from_now)
 
     travel_to(1.minute.from_now) do
-      rescheduled = solid_queue_jobs(:scheduled).sole
-      assert_equal job.job_id, rescheduled.active_job_id
-      assert_equal 2, rescheduled.arguments["executions"]
-      assert_in_delta Time.current + 21, rescheduled.scheduled_at, 2
+      job.reload
+      assert_equal 2, job.attempts
+      assert_in_delta Time.current + 21, job.run_at, 2
+      assert_equal [ job.active_job_id ], solid_queue_jobs(:scheduled).map(&:active_job_id)
     end
   end
 
   test "a failing job with a custom reschedule_at is rescheduled at that time" do
-    Delayed::Job.enqueue(CustomRescheduleJob.new(99.minutes))
+    job = Delayed::Job.enqueue(CustomRescheduleJob.new(99.minutes))
 
     freeze_time do
       perform_ready_jobs
 
-      assert_in_delta Time.current + 99.minutes, solid_queue_jobs(:scheduled).sole.scheduled_at, 1
+      assert_in_delta Time.current + 99.minutes, job.reload.run_at, 1
     end
   end
 
   test "a rescheduled job keeps its queue and priority" do
-    Delayed::Job.enqueue(ErrorJob.new, queue: "retries", priority: 7)
+    job = Delayed::Job.enqueue(ErrorJob.new, queue: "retries", priority: 7)
 
     perform_ready_jobs
 
-    rescheduled = solid_queue_jobs(:scheduled).sole
-    assert_equal "retries", rescheduled.queue_name
-    assert_equal 7, rescheduled.priority
+    job.reload
+    assert_equal [ "retries", 7 ], [ job.queue, job.priority ]
+    assert_equal [ "retries", 7 ], [ stored_job(job).queue_name, stored_job(job).priority ]
   end
 
   test "publishes retry.delayed_job when a job is rescheduled" do
@@ -137,7 +139,7 @@ class RetryPolicyTest < ActiveSupport::TestCase
     events = capture_delayed_job_events { perform_ready_jobs }
 
     retry_event = events.find { |event| event.name == "retry.delayed_job" }
-    assert_equal job.job_id, retry_event.payload[:job_id]
+    assert_equal job.active_job_id, retry_event.payload[:job_id]
     assert_equal 1, retry_event.payload[:attempts]
     assert_equal false, events.find { |event| event.name == "perform.delayed_job" }.payload[:success]
   end
@@ -172,10 +174,12 @@ class RetryPolicyTest < ActiveSupport::TestCase
     perform_ready_jobs
 
     assert_equal [ "enqueue", "before", "error: RuntimeError", "after", "failure" ], CallbackJob.messages
-    failed = solid_queue_jobs(:failed)
-    assert_equal [ job.job_id ], failed.map(&:active_job_id)
-    assert_equal "did not work", failed_job_error(job.job_id)[:message]
-    assert_equal "RuntimeError", failed_job_error(job.job_id)[:exception_class]
+    job.reload
+    assert job.failed?
+    assert_equal 1, job.attempts
+    assert_match(/\Adid not work\n/, job.last_error)
+    assert_equal [ job.active_job_id ], solid_queue_jobs(:failed).map(&:active_job_id)
+    assert_equal "RuntimeError", failed_job_error(job)[:exception_class]
     assert_empty queued_jobs
   end
 
@@ -195,7 +199,7 @@ class RetryPolicyTest < ActiveSupport::TestCase
     perform_ready_jobs
 
     assert_equal 1, KeptFailureJob.failures
-    assert_equal [ job.job_id ], solid_queue_jobs(:failed).map(&:active_job_id)
+    assert job.reload.failed?
   end
 
   test "the payload's destroy_failed_jobs? removes failed jobs" do
@@ -216,7 +220,7 @@ class RetryPolicyTest < ActiveSupport::TestCase
 
     perform_ready_jobs
 
-    assert_equal [ job.job_id ], solid_queue_jobs(:failed).map(&:active_job_id)
+    assert job.reload.failed?
     assert(Delayed::Worker.logger.messages.any? { |level, message| level == "error" && message.include?("Error when running failure callback: failure hook broke") })
   end
 
@@ -230,8 +234,9 @@ class RetryPolicyTest < ActiveSupport::TestCase
     perform_ready_jobs
 
     assert_equal 0, SimpleJob.runs
-    assert_equal "RuntimeError", failed_job_error(job.job_id)[:exception_class]
-    assert_equal "SimpleJob failed", failed_job_error(job.job_id)[:message]
+    assert job.reload.failed?
+    assert_equal "RuntimeError", failed_job_error(job)[:exception_class]
+    assert_equal "SimpleJob failed", failed_job_error(job)[:message]
   end
 
   test "publishes failure.delayed_job when retries are exhausted" do
@@ -241,7 +246,7 @@ class RetryPolicyTest < ActiveSupport::TestCase
     events = capture_delayed_job_events { perform_ready_jobs }
 
     failure = events.find { |event| event.name == "failure.delayed_job" }
-    assert_equal job.job_id, failure.payload[:job_id]
+    assert_equal job.active_job_id, failure.payload[:job_id]
     assert_equal 1, failure.payload[:attempts]
   end
 
@@ -253,11 +258,12 @@ class RetryPolicyTest < ActiveSupport::TestCase
 
     events = capture_delayed_job_events { perform_ready_jobs }
 
-    error = failed_job_error(job.job_id)
-    assert_equal "Delayed::WorkerTimeout", error[:exception_class]
-    assert_match(/expired/, error[:message])
-    assert_match(/Delayed::Worker\.max_run_time is only 1 second/, error[:message])
-    assert(events.any? { |event| event.name == "timeout.delayed_job" && event.payload[:job_id] == job.job_id })
+    job.reload
+    assert_match(/expired/, job.last_error)
+    assert_match(/Delayed::Worker\.max_run_time is only 1 second/, job.last_error)
+    assert_equal 1, job.attempts
+    assert_equal "Delayed::WorkerTimeout", failed_job_error(job)[:exception_class]
+    assert(events.any? { |event| event.name == "timeout.delayed_job" && event.payload[:job_id] == job.active_job_id })
   end
 
   test "jobs that exceed their own max_run_time time out" do
@@ -269,7 +275,7 @@ class RetryPolicyTest < ActiveSupport::TestCase
     perform_ready_jobs
 
     assert_operator Process.clock_gettime(Process::CLOCK_MONOTONIC) - started, :<, 4
-    assert_equal "Delayed::WorkerTimeout", failed_job_error(job.job_id)[:exception_class]
+    assert_equal "Delayed::WorkerTimeout", failed_job_error(job)[:exception_class]
   end
 
   test "a timed out job is rescheduled like any failure" do
@@ -278,7 +284,8 @@ class RetryPolicyTest < ActiveSupport::TestCase
 
     perform_ready_jobs
 
-    assert_equal [ job.job_id ], solid_queue_jobs(:scheduled).map(&:active_job_id)
+    assert_equal 1, job.reload.attempts
+    assert_nil job.failed_at
   end
 
   test "jobs whose payload cannot be loaded fail permanently" do
@@ -290,9 +297,10 @@ class RetryPolicyTest < ActiveSupport::TestCase
     perform_ready_jobs
 
     assert_empty queued_jobs
-    error = failed_job_error(job.job_id)
-    assert_equal "Delayed::DeserializationError", error[:exception_class]
-    assert_match(/\AJob failed to load: /, error[:message])
+    job.reload
+    assert job.failed?
+    assert_match(/\AJob failed to load: /, job.last_error)
+    assert_equal "Delayed::DeserializationError", failed_job_error(job)[:exception_class]
   end
 
   test "jobs whose payload cannot be loaded are removed when destroy_failed_jobs is true" do
@@ -329,7 +337,7 @@ class RetryPolicyTest < ActiveSupport::TestCase
 
     wrapped = Delayed::Job.enqueue(SimpleJob.new)
     plain = PlainActiveJob.perform_later
-    assert_equal 1.hour, solid_queue_job(wrapped.job_id).run_time_limit
+    assert_equal 1.hour, stored_job(wrapped).run_time_limit
     assert_nil solid_queue_job(plain.job_id).run_time_limit
   end
 
@@ -416,7 +424,7 @@ class RetryPolicyTest < ActiveSupport::TestCase
     SolidQueue::ReadyExecution.claim("*", 1, process.id)
     SolidQueue::ClaimedExecution.fail_all_with(SolidQueue::Processes::ProcessPrunedError.new(process.last_heartbeat_at))
 
-    assert_equal [ job.job_id ], solid_queue_jobs(:pending).map(&:active_job_id)
+    assert_equal [ job.active_job_id ], solid_queue_jobs(:pending).map(&:active_job_id)
     perform_ready_jobs
     assert_equal 1, SimpleJob.runs
   ensure

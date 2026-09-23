@@ -399,8 +399,11 @@ class WorkerTest < ActiveSupport::TestCase
     assert_match(/did not work/, job.last_error)
     assert_equal 1, job.attempts
     assert job.failed?
-    assert_equal [ job.job_id ], solid_queue_jobs(:failed).map(&:active_job_id)
-    assert_match(/did not work/, failed_job_error(job.job_id)[:message])
+    job.reload
+    assert job.failed?
+    assert_match(/did not work/, job.last_error)
+    assert_equal 1, job.attempts
+    assert_equal [ job.active_job_id ], solid_queue_jobs(:failed).map(&:active_job_id)
   end
 
   test "run re-schedules jobs after failing" do
@@ -415,9 +418,14 @@ class WorkerTest < ActiveSupport::TestCase
     assert_operator job.run_at, :<, 10.minutes.from_now
     assert_nil job.locked_by
     assert_nil job.locked_at
-    rescheduled = queued_jobs.sole
-    assert_equal job.job_id, rescheduled.active_job_id
-    assert_equal 1, rescheduled.arguments["executions"]
+    job.reload
+    assert_match(/did not work/, job.last_error)
+    assert_equal 1, job.attempts
+    assert_operator job.run_at, :>, 10.minutes.ago
+    assert_operator job.run_at, :<, 10.minutes.from_now
+    assert_nil job.locked_by
+    assert_nil job.locked_at
+    assert_equal [ job.active_job_id ], queued_jobs.map(&:active_job_id)
   end
 
   test "run re-schedules jobs with handler provided time if present" do
@@ -426,7 +434,7 @@ class WorkerTest < ActiveSupport::TestCase
     @worker.run(job)
 
     assert_in_delta 99.minutes.from_now, job.run_at, 1
-    assert_in_delta 99.minutes.from_now, solid_queue_jobs(:scheduled).sole.scheduled_at, 1
+    assert_in_delta 99.minutes.from_now, job.reload.run_at, 1
   end
 
   test "run does not fail when the triggered error doesn't have a message" do
@@ -446,7 +454,8 @@ class WorkerTest < ActiveSupport::TestCase
     @worker.run(job)
 
     assert job.failed?
-    assert_equal "Delayed::DeserializationError", failed_job_error(job.job_id)[:exception_class]
+    assert job.reload.failed?
+    assert_equal "Delayed::DeserializationError", failed_job_error(job)[:exception_class]
   end
 
   test "run runs the error lifecycle around the failure handling" do
@@ -459,7 +468,7 @@ class WorkerTest < ActiveSupport::TestCase
 
     @worker.run(job)
 
-    assert_equal [ [ @worker, Delayed::JobWrapper ] ], events
+    assert_equal [ [ @worker, Delayed::Job ] ], events
   end
 
   test "run publishes timeout.delayed_job" do
@@ -469,7 +478,7 @@ class WorkerTest < ActiveSupport::TestCase
     events = capture_delayed_job_events { @worker.run(job) }
 
     timeout = events.find { |event| event.name == "timeout.delayed_job" }
-    assert_equal job.job_id, timeout.payload[:job_id]
+    assert_equal job.active_job_id, timeout.payload[:job_id]
     assert_equal 1.second, timeout.payload[:max_run_time]
   end
 
@@ -509,7 +518,8 @@ class WorkerTest < ActiveSupport::TestCase
 
     @worker.reschedule(job)
     assert job.failed?
-    assert_equal [ job.job_id ], solid_queue_jobs(:failed).map(&:active_job_id)
+    assert job.reload.failed?
+    assert_equal Delayed::Worker.max_attempts, job.attempts
     assert_empty queued_jobs
   end
 
@@ -520,7 +530,7 @@ class WorkerTest < ActiveSupport::TestCase
     Delayed::Worker.max_attempts.times { @worker.reschedule(job) }
 
     assert job.failed?
-    assert_equal [ job.job_id ], solid_queue_jobs(:failed).map(&:active_job_id)
+    assert job.reload.failed?
   end
 
   test "reschedule runs the payload's failure hook" do
@@ -552,7 +562,7 @@ class WorkerTest < ActiveSupport::TestCase
     @worker.reschedule(job, later)
 
     assert_equal later, job.run_at
-    assert_in_delta later, solid_queue_jobs(:scheduled).sole.scheduled_at, 1
+    assert_in_delta later, job.reload.run_at, 1
   end
 
   test "failed runs the failure lifecycle and publishes failure.delayed_job" do
@@ -562,7 +572,7 @@ class WorkerTest < ActiveSupport::TestCase
 
     notifications = capture_delayed_job_events { @worker.failed(job) }
 
-    assert_equal [ [ @worker, Delayed::JobWrapper ] ], events
+    assert_equal [ [ @worker, Delayed::Job ] ], events
     assert_equal [ "failure.delayed_job" ], notifications.map(&:name)
     assert_empty queued_jobs
   end

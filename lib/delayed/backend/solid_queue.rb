@@ -198,13 +198,28 @@ module Delayed
         end
 
         def handler
-          @handler ||= persisted? ? persisted_handler : nil
+          @handler ||= persisted? ? persisted_handler : @payload_object&.to_yaml
+        end
+
+        def payload_object=(object)
+          @payload_object = object
+          @handler = nil
         end
 
         def payload_object
           return super unless persisted?
 
           @payload_object ||= persisted_payload
+        end
+
+        def delivery_mode=(mode)
+          @delivery_mode = mode.nil? ? nil : Delayed::RetryPolicy.delivery_mode!(mode)
+        end
+
+        def delivery_mode
+          return Delayed::RetryPolicy.resolve_delivery_mode(@delivery_mode) { payload_object } unless persisted?
+
+          deserialized_active_job.try(:delivery_mode) if active_job_class
         end
 
         def save
@@ -351,7 +366,7 @@ module Delayed
               enqueue_adapter_wrapper(payload)
             elsif Delayed::JobWrapper.respond_to?(:enqueue_payload)
               Delayed::JobWrapper.enqueue_payload(payload, { queue: queue, priority: priority, run_at: run_at,
-                attempts: attempts, job_id: active_job_id }.compact)
+                attempts: attempts, job_id: active_job_id, delivery_mode: @delivery_mode }.compact)
             else
               raise NotImplementedError, "Delayed::JobWrapper.enqueue_payload is required to save Delayed::Job records"
             end

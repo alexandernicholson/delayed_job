@@ -16,6 +16,8 @@
 
 `worker` is the `Delayed::Worker` running the job: the one that called `start` or `work_off`, or `Delayed::Worker.current` (a default instance) when Solid Queue runs jobs from `bin/jobs`.
 
+`job` is the `Delayed::Job` record for `:enqueue`, and for `:invoke_job` when a record runs (`delay_jobs = false`, `job.invoke_job`, `worker.run(job)`). While Solid Queue runs a job, `:perform`, `:invoke_job`, `:error` and `:failure` receive its `Delayed::JobWrapper`, which has the record's readers (`id`, `name`, `queue`, `priority`, `run_at`, `attempts`, `payload_object`, `error`, `last_error`).
+
 `Delayed::Lifecycle::EVENTS` lists every event with its argument names.
 
 ## Writing a plugin

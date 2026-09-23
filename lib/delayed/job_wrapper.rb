@@ -15,10 +15,7 @@ module Delayed
       def enqueue_payload(payload_object, options = {})
         new(payload_object).tap do |job|
           job.send(:apply_options, options)
-          Delayed::Worker.lifecycle.run_callbacks(:enqueue, job) do
-            job.hook(:enqueue)
-            Delayed::Worker.delay_job?(job) ? instrument(:enqueue, job) { job.save } : job.invoke_job
-          end
+          instrument(:enqueue, job) { job.save }
         end
       end
 
@@ -50,7 +47,7 @@ module Delayed
       def event_payload(job)
         {
           display_name: job.name,
-          job_id: job.respond_to?(:job_id) ? job.job_id : job.id,
+          job_id: job.respond_to?(:active_job_id) ? job.active_job_id : job.job_id,
           queue: job.queue,
           priority: job.priority,
           attempts: job.attempts
@@ -77,7 +74,10 @@ module Delayed
     end
 
     def serialize
-      super.tap { |job_data| job_data["delivery_mode"] = @delivery_mode_option.to_s if @delivery_mode_option }
+      super.tap do |job_data|
+        job_data["delivery_mode"] = @delivery_mode_option.to_s if @delivery_mode_option
+        job_data["last_error"] = last_error if last_error
+      end
     end
 
     def deserialize(job_data)
@@ -85,15 +85,16 @@ module Delayed
       @serialized_payload = Array(job_data["arguments"]).first
       @attempts = executions.to_i
       @delivery_mode_option = job_data["delivery_mode"]&.to_sym
+      self.last_error = job_data["last_error"]
     end
 
     def delivery_mode
-      @delivery_mode_option || payload_delivery_mode || Delayed::Worker.delivery_mode
+      RetryPolicy.resolve_delivery_mode(@delivery_mode_option) { payload_object }
     end
 
     def payload_object
       deserialize_arguments_if_needed
-      raise DeserializationError, "Job failed to load: #{(@payload_error.cause || @payload_error).message}. Handler: #{handler.inspect}" if @payload_error
+      raise DeserializationError, "Job failed to load: #{(@payload_error.cause || @payload_error).message}. Handler: #{serialized_handler.inspect}" if @payload_error
 
       arguments.first
     end
@@ -107,7 +108,9 @@ module Delayed
     end
 
     def handler
-      ActiveSupport::JSON.encode(serialized_payload)
+      payload_object.to_yaml
+    rescue DeserializationError, TypeError
+      serialized_handler
     end
 
     def name
@@ -228,11 +231,8 @@ module Delayed
         @delivery_mode_option = RetryPolicy.delivery_mode!(options[:delivery_mode]) unless options[:delivery_mode].nil?
       end
 
-      def payload_delivery_mode
-        payload = payload_object
-        RetryPolicy.delivery_mode!(payload.delivery_mode) if !payload.is_a?(PerformableMethod) && payload.respond_to?(:delivery_mode)
-      rescue DeserializationError
-        nil
+      def serialized_handler
+        "--- !ruby/object:#{payload_class_name} #{ActiveSupport::JSON.encode(serialized_payload)}\n"
       end
 
       def serialize_arguments(arguments)

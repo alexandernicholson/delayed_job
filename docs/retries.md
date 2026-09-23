@@ -100,7 +100,7 @@ Delayed::Worker.delivery_mode = :at_least_once
 
 ## Notifications
 
-Subscribe with `ActiveSupport::Notifications.subscribe(/\.delayed_job\z/)`. Every payload has `display_name`, `job_id`, `queue`, `priority` and `attempts`:
+Subscribe with `ActiveSupport::Notifications.subscribe(/\.delayed_job\z/)`. Every payload has `display_name`, `job_id` (the Active Job id, `Delayed::Job#active_job_id`, which stays the same across retries), `queue`, `priority` and `attempts`:
 
 | Event | When | Extra keys |
 |---|---|---|

@@ -179,7 +179,7 @@ class MessageSendingTest < ActiveSupport::TestCase
     job = FairyTail.delay(delivery_mode: :at_least_once).princesses
 
     assert_equal :at_least_once, job.delivery_mode
-    assert_equal "at_least_once", serialized_job(job.job_id)["delivery_mode"]
+    assert_equal "at_least_once", stored_arguments(job)["delivery_mode"]
   end
 
   test "handle_asynchronously evaluates option procs on every call" do
@@ -232,7 +232,8 @@ class MessageSendingTest < ActiveSupport::TestCase
   test "delay stores the job in the requested queue with its priority" do
     job = FairyTail.delay(queue: "tales", priority: 4).princesses
 
-    stored = solid_queue_job(job.job_id)
+    assert_equal [ "tales", 4 ], [ job.queue, job.priority ]
+    stored = stored_job(job)
     assert_equal "tales", stored.queue_name
     assert_equal 4, stored.priority
     assert_equal "Delayed::JobWrapper", stored.class_name

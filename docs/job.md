@@ -22,7 +22,7 @@ flowchart LR
 | `queue` | `queue_name` | job `queue_name` |
 | `run_at` | `scheduled_at` (falls back to `created_at`) | `scheduled_at`; a future time makes the job scheduled, a past time makes it ready |
 | `attempts` | Active Job `executions`, +1 while the job is failed (Solid Queue keeps the arguments from before the failing run) | `executions` in the serialized job |
-| `handler` | YAML of the payload: `Delayed::JobWrapper`'s handler or payload, else `ActiveJob::QueueAdapters::DelayedJobAdapter::JobWrapper` around the Active Job data | the payload, when a new job is saved |
+| `handler` | YAML of the payload: `Delayed::JobWrapper`'s handler (the payload's YAML, or a `!ruby/object:`-tagged document of the serialized payload when it can't load), else `ActiveJob::QueueAdapters::DelayedJobAdapter::JobWrapper` around the Active Job data. A new job builds it from `payload_object` when read | the payload, when a new job is saved |
 | `payload_object` | `Delayed::JobWrapper#payload_object`, else the adapter `JobWrapper` (so `name` is `"MyJob [id] from DelayedJob(queue) with arguments: [...]"`) | see `save` |
 | `name` | `payload_object.display_name`, else the payload class name; the `!ruby/object:` tag of the handler when the payload can't load | n/a |
 | `last_error` | failed execution `error` as `"message\nbacktrace"`, or `last_error` stored in the serialized job by a reschedule | `last_error` in the serialized job, or the failed execution error when `failed_at` is set |
@@ -58,7 +58,8 @@ Finished jobs aren't visible: delayed_job deleted successful jobs, so `count`, `
 
 | Call | Behaviour |
 |---|---|
-| `save` / `save!` (new job) | `Delayed::JobWrapper.enqueue_payload(payload, queue:, priority:, run_at:, attempts:, job_id:)`. A Rails adapter `JobWrapper` payload enqueues its Active Job directly. Saving with `locked_by` or `failed_at` claims or fails the new job straight away |
+| `delivery_mode` | `delivery_mode:` given to `new` / `enqueue`, else the payload's `delivery_mode`, else `Delayed::Worker.delivery_mode`; read back from the stored wrapper once saved. See [delivery modes](retries.md#delivery-modes) |
+| `save` / `save!` (new job) | `Delayed::JobWrapper.enqueue_payload(payload, queue:, priority:, run_at:, attempts:, job_id:, delivery_mode:)`. A Rails adapter `JobWrapper` payload enqueues its Active Job directly. Saving with `locked_by` or `failed_at` claims or fails the new job straight away |
 | `save` / `save!` / `update` (persisted job) | rewrites queue, priority, run_at, attempts and last_error. `failed_at` fails the job, otherwise it becomes ready or scheduled. This is what `Delayed::Worker#reschedule` and `#failed` use. A claimed job that keeps its `locked_by` is updated in place, so the claim, and the worker running it, are left alone. The write only happens if the job is still in the state (and, when claimed, held by the same claim) it was loaded in. Otherwise `save` and `update` return `false`, and `save!` and `update!` raise `Delayed::Backend::SolidQueue::StaleJobError`; `reload` and retry. `update_all` returns how many jobs it changed |
 | `destroy` / `delete` | discards the ready, scheduled, blocked or failed row, or deletes a claimed job. Deleting a claimed job that has a concurrency limit releases its slot to the next blocked job |
 | `reload` | re-reads the job, following Active Job retries through `active_job_id`, and resets the payload |

@@ -14,6 +14,21 @@ module Delayed
       mode.to_sym
     end
 
+    def self.resolve_delivery_mode(option)
+      return delivery_mode!(option) unless option.nil?
+
+      payload = begin
+        yield
+      rescue DeserializationError
+        nil
+      end
+      if !payload.is_a?(PerformableMethod) && payload.respond_to?(:delivery_mode)
+        delivery_mode!(payload.delivery_mode)
+      else
+        Delayed::Worker.delivery_mode
+      end
+    end
+
     def reschedule_at
       if payload_object.respond_to?(:reschedule_at)
         payload_object.reschedule_at(db_time_now, attempts)

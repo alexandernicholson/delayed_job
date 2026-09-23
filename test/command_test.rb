@@ -176,7 +176,7 @@ class CommandTest < ActiveSupport::TestCase
 
   test "supervisor options without flags" do
     options = Delayed::Command.new([]).supervisor_options
-    worker = { queues: "*", processes: 1, threads: 1, polling_interval: ::SolidQueue::Configuration::WORKER_DEFAULTS[:polling_interval] }
+    worker = { queues: "*", processes: 1, threads: 1, polling_interval: Delayed::Worker::DEFAULT_SLEEP_DELAY }
 
     assert_equal [ worker ], options[:workers]
     assert_equal [ ::SolidQueue::Configuration::DISPATCHER_DEFAULTS ], options[:dispatchers]

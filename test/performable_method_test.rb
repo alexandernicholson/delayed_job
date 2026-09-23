@@ -132,7 +132,7 @@ class PerformableMethodTest < ActiveSupport::TestCase
       Delayed::Worker.delay_jobs = false
       story = Story.create(text: "hello")
 
-      story.expects(hook).with(instance_of(Delayed::JobWrapper))
+      story.expects(hook).with(instance_of(Delayed::Job))
       story.delay.tell
     end
   end
@@ -140,7 +140,7 @@ class PerformableMethodTest < ActiveSupport::TestCase
   test "delegates enqueue hook to object" do
     story = Story.create(text: "hello")
 
-    story.expects(:enqueue).with(instance_of(Delayed::JobWrapper))
+    story.expects(:enqueue).with(instance_of(Delayed::Job))
     story.delay.tell
   end
 
@@ -157,7 +157,7 @@ class PerformableMethodTest < ActiveSupport::TestCase
     Delayed::Worker.delay_jobs = false
     story = Story.create(text: "hello")
 
-    story.expects(:error).with(instance_of(Delayed::JobWrapper), instance_of(RuntimeError))
+    story.expects(:error).with(instance_of(Delayed::Job), instance_of(RuntimeError))
     story.expects(:tell).raises(RuntimeError)
     assert_raises(RuntimeError) { story.delay.tell }
   end
