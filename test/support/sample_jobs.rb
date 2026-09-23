@@ -214,3 +214,26 @@ end
 class PlainActiveJob < ActiveJob::Base
   def perform; end
 end
+
+class SideEffectJob < ActiveJob::Base
+  def perform; end
+end
+
+class EnqueueThenFailJob
+  def perform
+    SideEffectJob.perform_later
+    raise "did not work"
+  end
+end
+
+class EnqueueThenSucceedJob
+  def perform
+    SideEffectJob.perform_later
+  end
+end
+
+class EnqueueOnErrorJob < ErrorJob
+  def error(_job, _error)
+    SideEffectJob.perform_later
+  end
+end

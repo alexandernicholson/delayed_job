@@ -248,9 +248,11 @@ module Delayed
 
       def invoke_job
         Base.run_lifecycle(:invoke_job, self) do
-          hook :before
-          payload_object.perform
-          hook :success
+          ActiveJob::DeliveryModes.within_attempt do
+            hook :before
+            payload_object.perform
+            hook :success
+          end
         rescue Exception => e
           hook :error, e
           raise e

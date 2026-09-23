@@ -230,7 +230,7 @@ module Delayed
       failed(job)
     rescue Exception => e
       e = worker_timeout_for(e)
-      JobWrapper.instrument(:timeout, job, max_run_time: max_run_time(job)) if e.is_a?(WorkerTimeout)
+      JobWrapper.instrument(:timeout, job, max_run_time: effective_run_time(job)) if e.is_a?(WorkerTimeout)
       self.class.lifecycle.run_callbacks(:error, self, job) { handle_failed_job(job, e) }
       false
     end
@@ -403,6 +403,10 @@ module Delayed
         Delayed::Job.recover_from(error) if Delayed::Job.respond_to?(:recover_from)
         @failed_reserve_count += 1
         raise FatalBackendError if @failed_reserve_count >= 10
+      end
+
+      def effective_run_time(job)
+        [ max_run_time(job), job.try(:solid_queue_run_time_limit) ].compact.min
       end
 
       def own_run_time_limit(job)

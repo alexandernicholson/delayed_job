@@ -335,10 +335,29 @@ class RetryPolicyTest < ActiveSupport::TestCase
     assert_nil PlainActiveJob.run_time_limit
     assert_nil ActiveJob::Base.run_time_limit
 
-    wrapped = Delayed::Job.enqueue(SimpleJob.new)
+    wrapped = Delayed::Job.enqueue(SimpleJob.new, delivery_mode: :at_least_once)
+    exactly_once = Delayed::Job.enqueue(SimpleJob.new)
     plain = PlainActiveJob.perform_later
     assert_equal 1.hour, stored_job(wrapped).run_time_limit
+    assert_equal SolidQueue.exactly_once_timeout, stored_job(exactly_once).run_time_limit
     assert_nil solid_queue_job(plain.job_id).run_time_limit
+  end
+
+  test "exactly-once attempts time out at SolidQueue.exactly_once_timeout" do
+    previous = SolidQueue.exactly_once_timeout
+    SolidQueue.exactly_once_timeout = 1.second
+    Delayed::Worker.max_attempts = 1
+    Delayed::Worker.destroy_failed_jobs = false
+    job = Delayed::Job.enqueue(LongRunningJob.new)
+
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    events = capture_delayed_job_events { perform_ready_jobs }
+
+    assert_operator Process.clock_gettime(Process::CLOCK_MONOTONIC) - started, :<, 4
+    assert_equal "Delayed::WorkerTimeout", failed_job_error(job)[:exception_class]
+    assert_equal [ 1.second ], events.select { |event| event.name == "timeout.delayed_job" }.map { |event| event.payload[:max_run_time] }
+  ensure
+    SolidQueue.exactly_once_timeout = previous
   end
 
   test "reset restores the Delayed::JobWrapper run-time limit" do
@@ -361,12 +380,10 @@ class RetryPolicyTest < ActiveSupport::TestCase
     Delayed::Worker.max_attempts = 7
 
     assert_nil SolidQueue.retry_on_process_death
-    assert_nil PlainActiveJob.try(:process_death_attempts)
+    assert_nil PlainActiveJob.process_death_attempts
   end
 
   test "Delayed::Worker.max_attempts caps death retries for Delayed::JobWrapper jobs" do
-    skip "needs Solid Queue per-job death retries" unless Delayed::JobWrapper.respond_to?(:retries_on_process_death)
-
     Delayed::Worker.max_attempts = 7
     assert_equal 7, Delayed::JobWrapper.process_death_attempts
 
@@ -378,7 +395,7 @@ class RetryPolicyTest < ActiveSupport::TestCase
     script = <<~RUBY
       require "test_helper"
       values = [ Delayed::JobWrapper.run_time_limit.to_i, PlainActiveJob.run_time_limit.inspect, SolidQueue.max_run_time.inspect,
-        SolidQueue.retry_on_process_death.inspect, Delayed::JobWrapper.try(:process_death_attempts).inspect ]
+        SolidQueue.retry_on_process_death.inspect, Delayed::JobWrapper.process_death_attempts.inspect ]
       puts "limits=\#{values.join(",")}"
       $stdout.flush
       FileUtils.remove_entry(TEST_ROOT)
@@ -387,38 +404,10 @@ class RetryPolicyTest < ActiveSupport::TestCase
 
     output = IO.popen([ RbConfig.ruby, "-I", __dir__, "-I", File.expand_path("../lib", __dir__), "-e", script ], err: File::NULL, &:read)
 
-    death_attempts = Delayed::JobWrapper.respond_to?(:retries_on_process_death) ? "25" : "nil"
-    assert_includes output, "limits=#{4.hours.to_i},nil,nil,nil,#{death_attempts}"
-  end
-
-  test "per-job death retries added by Solid Queue at boot are applied to Delayed::JobWrapper" do
-    script = <<~RUBY
-      require "rails"
-      class StandInDeathRetries < Rails::Railtie
-        initializer "stand_in.death_retries" do
-          ActiveSupport.on_load(:active_job) do
-            unless respond_to?(:retries_on_process_death)
-              class_attribute :process_death_attempts, instance_accessor: false
-              define_singleton_method(:retries_on_process_death) { |attempts:| self.process_death_attempts = attempts }
-            end
-          end
-        end
-      end
-      require "test_helper"
-      puts "attempts=\#{Delayed::JobWrapper.process_death_attempts.inspect},\#{PlainActiveJob.process_death_attempts.inspect}"
-      $stdout.flush
-      FileUtils.remove_entry(TEST_ROOT)
-      exit!(0)
-    RUBY
-
-    output = IO.popen([ RbConfig.ruby, "-I", __dir__, "-I", File.expand_path("../lib", __dir__), "-e", script ], err: File::NULL, &:read)
-
-    assert_includes output, "attempts=25,nil"
+    assert_includes output, "limits=#{4.hours.to_i},nil,nil,nil,25"
   end
 
   test "jobs claimed by a process that died are re-run" do
-    skip "needs Solid Queue per-job death retries" unless Delayed::JobWrapper.respond_to?(:retries_on_process_death)
-
     job = Delayed::Job.enqueue(SimpleJob.new)
     process = register_test_process
     SolidQueue::ReadyExecution.claim("*", 1, process.id)
@@ -427,6 +416,36 @@ class RetryPolicyTest < ActiveSupport::TestCase
     assert_equal [ job.active_job_id ], solid_queue_jobs(:pending).map(&:active_job_id)
     perform_ready_jobs
     assert_equal 1, SimpleJob.runs
+  ensure
+    process&.deregister
+  end
+
+  test "at-least-once jobs claimed by a process that died are retried up to max_attempts" do
+    Delayed::Worker.max_attempts = 2
+    job = Delayed::Job.enqueue(SimpleJob.new, delivery_mode: :at_least_once)
+    process = register_test_process
+    SolidQueue::ReadyExecution.claim("*", 1, process.id)
+    SolidQueue::ClaimedExecution.fail_all_with(SolidQueue::Processes::ProcessPrunedError.new(process.last_heartbeat_at))
+
+    assert_equal [ job.active_job_id ], solid_queue_jobs(:pending).map(&:active_job_id)
+
+    SolidQueue::ReadyExecution.claim("*", 1, process.id)
+    SolidQueue::ClaimedExecution.fail_all_with(SolidQueue::Processes::ProcessPrunedError.new(process.last_heartbeat_at))
+
+    assert_empty solid_queue_jobs(:pending)
+    assert_equal [ job.active_job_id ], solid_queue_jobs(:failed).map(&:active_job_id)
+  ensure
+    process&.deregister
+  end
+
+  test "exactly-once jobs claimed by a process that died are released without a failure" do
+    job = Delayed::Job.enqueue(SimpleJob.new)
+    process = register_test_process
+    SolidQueue::ReadyExecution.claim("*", 1, process.id)
+    SolidQueue::ClaimedExecution.fail_all_with(SolidQueue::Processes::ProcessPrunedError.new(process.last_heartbeat_at))
+
+    assert_equal [ job.active_job_id ], solid_queue_jobs(:pending).map(&:active_job_id)
+    assert_empty solid_queue_jobs(:failed)
   ensure
     process&.deregister
   end

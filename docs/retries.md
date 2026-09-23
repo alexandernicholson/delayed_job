@@ -54,7 +54,7 @@ An attempt that runs longer than `max_run_time(job)` is interrupted with `Delaye
 execution expired (Delayed::Worker.max_run_time is only 60 seconds)
 ```
 
-`timeout.delayed_job` is published with the job details and `max_run_time`, and the timeout then goes through the normal failure path: it is rescheduled while attempts remain.
+`timeout.delayed_job` is published with the job details and `max_run_time`, the limit that interrupted the attempt, and the timeout then goes through the normal failure path: it is rescheduled while attempts remain.
 
 `Delayed::Worker.max_run_time` also becomes the Solid Queue run-time limit of `Delayed::JobWrapper` (`Delayed::JobWrapper.run_time_limit`, the `limits_run_time` setting), so Solid Queue's watchdog records a deadline on each delayed_job claim and supervisor maintenance fails a job stuck past it even if its thread never returns. Only delayed_job jobs get this limit: `SolidQueue.max_run_time` and the app's other Active Job classes keep their own settings. A payload's shorter `max_run_time` is enforced inside the attempt.
 
@@ -75,7 +75,7 @@ Each delayed_job job carries a delivery mode, which Solid Queue stores when the 
 
 | Mode | Guarantee |
 |---|---|
-| `:exactly_once` | The default for delayed_job jobs. The perform and the job's completion share one queue-database transaction, so the job is recorded as run once. |
+| `:exactly_once` | The default for delayed_job jobs. The perform and the job's completion share one queue-database transaction, so the job is recorded as run once. A failed attempt's queue-database writes and enqueues roll back; its `error` hook and reschedule commit. |
 | `:at_least_once` | Solid Queue's default for other Active Job classes. A job interrupted by a crash runs again. |
 | `:at_most_once` | A job interrupted by a crash is not run again. |
 
@@ -87,7 +87,7 @@ The mode is resolved in this order:
 
 For delayed method calls (`delay`, `handle_asynchronously`), use the option. A `delivery_mode` method or attribute on the target object is left alone, so a model with a `delivery_mode` column keeps working. Unknown modes raise `ArgumentError` when set or enqueued. `Delayed::Worker.delivery_mode` only affects delayed_job jobs; other Active Job classes keep `SolidQueue.default_delivery_mode`.
 
-`:exactly_once` keeps one queue-database transaction open for the whole perform, capped at `SolidQueue.exactly_once_timeout` (60 seconds by default). Use `:at_least_once` for jobs that run longer, and make them idempotent:
+`:exactly_once` keeps one queue-database transaction open for the whole perform, capped at `SolidQueue.exactly_once_timeout` (50 seconds by default); an attempt past it times out with `Delayed::WorkerTimeout` like any other. Use `:at_least_once` for jobs that run longer, and make them idempotent:
 
 ```ruby
 class ReportJob

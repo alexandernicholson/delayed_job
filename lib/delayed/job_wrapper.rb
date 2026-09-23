@@ -125,9 +125,11 @@ module Delayed
 
     def invoke_job
       Delayed::Worker.lifecycle.run_callbacks(:invoke_job, self) do
-        hook :before
-        payload_object.perform
-        hook :success
+        ActiveJob::DeliveryModes.within_attempt do
+          hook :before
+          payload_object.perform
+          hook :success
+        end
       rescue Exception => e
         hook :error, e
         raise e
@@ -186,7 +188,9 @@ module Delayed
     def solid_queue_run_time_limit
       return unless performing? && provider_job_id.present?
 
-      [ self.class.run_time_limit, ::SolidQueue.max_run_time ].compact.min
+      limits = [ self.class.run_time_limit, ::SolidQueue.max_run_time ]
+      limits << ::SolidQueue.exactly_once_timeout if ActiveJob::DeliveryModes.current_execution
+      limits.compact.min
     end
 
     def save

@@ -551,17 +551,13 @@ class JobWrapperTest < ActiveSupport::TestCase
 
   test "Delayed::Worker.delivery_mode leaves other Active Job classes alone" do
     plain = Class.new(ActiveJob::Base)
-    default = SolidQueue.try(:default_delivery_mode)
-
     Delayed::Worker.delivery_mode = :at_most_once
 
-    assert_equal default, SolidQueue.try(:default_delivery_mode)
-    assert_not_equal :at_most_once, plain.new.try(:delivery_mode)
+    assert_equal :at_least_once, SolidQueue.default_delivery_mode
+    assert_equal :at_least_once, plain.new.delivery_mode
   end
 
   test "Solid Queue stores the delivery mode of each job" do
-    skip "needs Solid Queue delivery modes" unless SolidQueue.respond_to?(:default_delivery_mode)
-
     default = Delayed::Job.enqueue(SimpleJob.new)
     opted_out = Delayed::Job.enqueue(SimpleJob.new, delivery_mode: :at_least_once)
     from_payload = Delayed::Job.enqueue(AtMostOnceJob.new)
@@ -572,8 +568,6 @@ class JobWrapperTest < ActiveSupport::TestCase
   end
 
   test "Solid Queue keeps its own default delivery mode for plain Active Job jobs" do
-    skip "needs Solid Queue delivery modes" unless SolidQueue.respond_to?(:default_delivery_mode)
-
     job = PlainActiveJob.perform_later
 
     assert_equal SolidQueue.default_delivery_mode.to_s, solid_queue_job(job.job_id).delivery_mode.to_s
@@ -604,5 +598,38 @@ class JobWrapperTest < ActiveSupport::TestCase
 
     assert_equal "named_job", stored_wrapper(job).display_name
     assert_equal "named_job", SolidQueue::Job.find(job.id).display_name
+  end
+
+  test "an exactly-once job commits the jobs it enqueues when it succeeds" do
+    job = Delayed::Job.enqueue(EnqueueThenSucceedJob.new)
+
+    perform_ready_jobs(job.queue)
+
+    assert_equal [ "SideEffectJob" ], queued_jobs.map(&:class_name)
+  end
+
+  test "an exactly-once job that fails rolls back its attempt and commits its reschedule" do
+    job = Delayed::Job.enqueue(EnqueueThenFailJob.new)
+
+    perform_ready_jobs(job.queue)
+
+    assert_equal [ "Delayed::JobWrapper" ], queued_jobs.map(&:class_name)
+    assert_equal 1, job.reload.attempts
+  end
+
+  test "an at-least-once job that fails keeps what its attempt enqueued" do
+    job = Delayed::Job.enqueue(EnqueueThenFailJob.new, delivery_mode: :at_least_once)
+
+    perform_ready_jobs(job.queue)
+
+    assert_equal [ "Delayed::JobWrapper", "SideEffectJob" ], queued_jobs.map(&:class_name).sort
+  end
+
+  test "the error hook of an exactly-once job commits with its reschedule" do
+    job = Delayed::Job.enqueue(EnqueueOnErrorJob.new)
+
+    perform_ready_jobs(job.queue)
+
+    assert_equal [ "Delayed::JobWrapper", "SideEffectJob" ], queued_jobs.map(&:class_name).sort
   end
 end
