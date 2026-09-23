@@ -111,3 +111,106 @@ module M
     end
   end
 end
+
+class ZeroArityHookJob
+  cattr_accessor :messages, default: []
+
+  def enqueue
+    self.class.messages << "enqueue"
+  end
+
+  def before
+    self.class.messages << "before"
+  end
+
+  def perform
+    self.class.messages << "perform"
+  end
+
+  def success
+    self.class.messages << "success"
+  end
+
+  def after
+    self.class.messages << "after"
+  end
+end
+
+class TwoAttemptJob < ErrorJob
+  def max_attempts
+    2
+  end
+end
+
+class KeptFailureJob < ErrorJob
+  cattr_accessor :failures, default: 0
+
+  def max_attempts
+    1
+  end
+
+  def destroy_failed_jobs?
+    false
+  end
+
+  def failure(_job)
+    self.class.failures += 1
+  end
+end
+
+class DestroyedFailureJob < KeptFailureJob
+  def destroy_failed_jobs?
+    true
+  end
+end
+
+class FailingFailureHookJob < ErrorJob
+  def max_attempts
+    1
+  end
+
+  def failure
+    raise "failure hook broke"
+  end
+end
+
+class ShortRunTimeJob
+  def perform
+    sleep 5
+  end
+
+  def max_run_time
+    1.second
+  end
+end
+
+class StatefulJob
+  cattr_accessor :performed, default: []
+  attr_reader :name, :count, :options
+
+  def initialize(name, count, options = {})
+    @name = name
+    @count = count
+    @options = options
+  end
+
+  def perform
+    self.class.performed << [ name, count, options ]
+  end
+end
+
+class FailingCallbackJob < CallbackJob
+  def perform
+    raise "did not work"
+  end
+end
+
+class AtMostOnceJob < SimpleJob
+  def delivery_mode
+    :at_most_once
+  end
+end
+
+class PlainActiveJob < ActiveJob::Base
+  def perform; end
+end
