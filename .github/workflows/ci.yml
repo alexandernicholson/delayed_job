@@ -1,0 +1,86 @@
+name: CI
+on: [ push, pull_request ]
+
+jobs:
+  rubocop:
+    name: RuboCop
+    runs-on: ubuntu-latest
+    env:
+      SOLID_QUEUE_PATH: ${{ github.workspace }}/../solid_queue
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Checkout Solid Queue
+        run: git clone --depth 1 --branch main https://github.com/alexandernicholson/solid_queue.git "$SOLID_QUEUE_PATH"
+      - name: Setup Ruby and install gems
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "4.0.7"
+          bundler-cache: true
+          cache-version: 1
+      - name: Run RuboCop
+        run: bundle exec rubocop --parallel
+
+  tests:
+    name: ${{ matrix.backend }} / ${{ matrix.lane }} / Ruby ${{ matrix.ruby-version }} / Rails ${{ matrix.rails-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [ active_record, mongodb ]
+        lane: [ pinned, latest ]
+        include:
+          - lane: pinned
+            ruby-version: "4.0.2"
+            rails-version: "8.0.5.1"
+          - lane: latest
+            ruby-version: "4.0.7"
+            rails-version: "8.1.3.1"
+    env:
+      SOLID_QUEUE_PATH: ${{ github.workspace }}/../solid_queue
+      SOLID_QUEUE_BACKEND: ${{ matrix.backend }}
+      RAILS_VERSION: ${{ matrix.rails-version }}
+      RAILS_ENV: test
+      MONGODB_URI: mongodb://127.0.0.1:27017/delayed_job_shim_test?replicaSet=rs0
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Checkout Solid Queue
+        run: git clone --depth 1 --branch main https://github.com/alexandernicholson/solid_queue.git "$SOLID_QUEUE_PATH"
+      - name: Start MongoDB replica set
+        if: matrix.backend == 'mongodb'
+        run: |
+          docker run --detach --name delayed-job-mongodb --publish 127.0.0.1:27017:27017 mongo:8.0 mongod --replSet rs0 --bind_ip_all
+          for attempt in $(seq 1 60); do
+            if docker exec delayed-job-mongodb mongosh --quiet --eval 'quit(db.adminCommand({ ping: 1 }).ok ? 0 : 1)'; then
+              break
+            fi
+            if [ "$attempt" -eq 60 ]; then
+              docker logs delayed-job-mongodb
+              exit 1
+            fi
+            sleep 1
+          done
+          docker exec delayed-job-mongodb mongosh --quiet --eval 'rs.initiate({_id:"rs0",members:[{_id:0,host:"127.0.0.1:27017"}]})'
+          for attempt in $(seq 1 60); do
+            if docker exec delayed-job-mongodb mongosh --quiet --eval 'quit(db.hello().isWritablePrimary ? 0 : 1)'; then
+              break
+            fi
+            if [ "$attempt" -eq 60 ]; then
+              docker logs delayed-job-mongodb
+              exit 1
+            fi
+            sleep 1
+          done
+      - name: Setup Ruby and install gems
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ matrix.ruby-version }}
+          bundler-cache: true
+          cache-version: 1
+      - name: Run tests
+        run: bundle exec rake test
+      - name: Show MongoDB logs on failure
+        if: failure() && matrix.backend == 'mongodb'
+        run: docker logs delayed-job-mongodb || true
