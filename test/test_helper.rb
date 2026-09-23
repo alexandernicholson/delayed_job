@@ -63,11 +63,11 @@ if BACKEND == :mongodb
 else
   ActiveRecord::Base.establish_connection(:primary)
   ActiveRecord::Schema.verbose = false
-  SolidQueue::Record.connection_pool.with_connection do
-    ActiveRecord::Schema.define do
-      instance_eval File.read(File.join(Gem.loaded_specs["solid_queue"].full_gem_path, "lib/generators/solid_queue/install/templates/db/queue_schema.rb")).sub(/\AActiveRecord::Schema\[[\d.]+\]\.define\(version: \d+\) do\n/, "").sub(/end\s*\z/, "")
-    end
+  queue_schema = File.read(File.join(Gem.loaded_specs["solid_queue"].full_gem_path, "lib/generators/solid_queue/install/templates/db/queue_schema.rb"))
+  SolidQueue::Record.connection_pool.with_connection do |connection|
+    connection.instance_eval(queue_schema.sub(/\AActiveRecord::Schema\[[\d.]+\]\.define\(version: \d+\) do\n/, "").sub(/end\s*\z/, ""))
   end
+  SolidQueue::Record.descendants.each(&:reset_column_information)
   ActiveRecord::Schema.define do
     create_table :stories, force: true do |t|
       t.string :text
