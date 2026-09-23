@@ -1,0 +1,6 @@
+/Gemfile.lock
+/tmp/
+/log/
+/coverage/
+*.sqlite3*
+.DS_Store

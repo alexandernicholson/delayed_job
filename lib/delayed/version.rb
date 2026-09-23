@@ -1,0 +1,5 @@
+# frozen_string_literal: true
+
+module Delayed
+  VERSION = "4.2.0.sq1"
+end
